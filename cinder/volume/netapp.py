@@ -1009,7 +1009,7 @@ class NetAppISCSIDriver(driver.ISCSIDriver):
         self._clone_lun(lun.HostId, src_path, dest_path, False)
         self._refresh_dfm_luns(lun.HostId)
         self._discover_dataset_luns(dataset, clone_name)
-        
+
     def check_for_export(self, context, volume_id):
         raise NotImplementedError()
 
@@ -1269,7 +1269,7 @@ class NetAppCmodeISCSIDriver(driver.ISCSIDriver):
         extra_args['Description'] = volume['display_description']
         extra_args['SpaceReserved'] = True
         self._clone_lun(lun.handle, new_name, extra_args)
-        
+
     def check_for_export(self, context, volume_id):
         raise NotImplementedError()
 
@@ -1442,7 +1442,7 @@ class NetAppDirectISCSIDriver(driver.ISCSIDriver):
         to do for unexporting.
         """
         pass
-    
+
     def check_for_export(self, context, volume_id):
         raise NotImplementedError()
 
