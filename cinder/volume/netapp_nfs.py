@@ -29,14 +29,16 @@ from cinder.openstack.common import cfg
 from cinder.openstack.common import log as logging
 from cinder.volume import nfs
 from cinder.volume.netapp import netapp_opts
+from cinder.volume.netapp import NaServer
+from cinder.volume.netapp import NaElement
+from cinder.volume.netapp import NaApiError
 
 LOG = logging.getLogger("cinder.volume.driver")
 
 netapp_nfs_opts = [
     cfg.IntOpt('synchronous_snapshot_create',
                default=0,
-               help='Does snapshot creation call returns immediately')
-    ]
+               help='Does snapshot creation call returns immediately')]
 
 FLAGS = flags.FLAGS
 FLAGS.register_opts(netapp_opts)
@@ -71,7 +73,7 @@ class NetAppNFSDriver(nfs.NfsDriver):
 
         if vol_size != snap_size:
             msg = _('Cannot create volume of size %(vol_size)s from '
-                'snapshot of size %(snap_size)s')
+                    'snapshot of size %(snap_size)s')
             raise exception.CinderException(msg % locals())
 
         self._clone_volume(snapshot.name, volume.name, snapshot.volume_id)
@@ -115,8 +117,8 @@ class NetAppNFSDriver(nfs.NfsDriver):
                                     username=FLAGS.netapp_login,
                                     password=FLAGS.netapp_password)
         soap_url = 'http://%s:%s/apis/soap/v1' % (
-                                          FLAGS.netapp_server_hostname,
-                                          FLAGS.netapp_server_port)
+            FLAGS.netapp_server_hostname,
+            FLAGS.netapp_server_port)
         client.set_options(location=soap_url)
 
         return client
@@ -144,7 +146,7 @@ class NetAppNFSDriver(nfs.NfsDriver):
                                                     clone_name))
 
         resp = self._client.service.ApiProxy(Target=host_id,
-                                            Request=request)
+                                             Request=request)
 
         if resp.Status == 'passed' and FLAGS.synchronous_snapshot_create:
             clone_id = resp.Results['clone-id'][0]
@@ -161,10 +163,10 @@ class NetAppNFSDriver(nfs.NfsDriver):
         :param clone_operation_id: Identifier of ONTAP clone operation
         """
         clone_list_options = ('<clone-id>'
-                                '<clone-id-info>'
-                                  '<clone-op-id>%d</clone-op-id>'
-                                  '<volume-uuid></volume-uuid>'
-                                '</clone-id>'
+                              '<clone-id-info>'
+                              '<clone-op-id>%d</clone-op-id>'
+                              '<volume-uuid></volume-uuid>'
+                              '</clone-id>'
                               '</clone-id-info>')
 
         request = self._client.factory.create('Request')
@@ -176,7 +178,7 @@ class NetAppNFSDriver(nfs.NfsDriver):
         while resp.Status != 'passed':
             time.sleep(1)
             resp = self._client.service.ApiProxy(Target=host_id,
-                                                Request=request)
+                                                 Request=request)
 
     def _get_provider_location(self, volume_id):
         """
@@ -219,7 +221,7 @@ class NetAppNFSDriver(nfs.NfsDriver):
         request.Args = text.Raw(command_args % export_path)
 
         resp = self._client.service.ApiProxy(Target=host_id,
-                                            Request=request)
+                                             Request=request)
 
         if resp.Status == 'passed':
             return resp.Results['actual-pathname'][0]
@@ -264,3 +266,289 @@ class NetAppNFSDriver(nfs.NfsDriver):
         """
         return os.path.join(self._get_mount_point_for_share(nfs_share),
                             volume_name)
+
+
+class NetAppCmodeNfsDriver (NetAppNFSDriver):
+    """Executes commands related to volumes on c mode"""
+    def __init__(self, *args, **kwargs):
+        super(NetAppCmodeNfsDriver, self).__init__(*args, **kwargs)
+
+    def do_setup(self, context):
+        self._context = context
+        self.check_for_setup_error()
+        self._client = NetAppCmodeNfsDriver._get_client()
+
+    def check_for_setup_error(self):
+        """Returns an error if prerequisites aren't met"""
+        NetAppCmodeNfsDriver._check_flags()
+
+    def _clone_volume(self, volume_name, clone_name, volume_id):
+        """Clones mounted volume with NetApp Cloud Services"""
+        host_ip = self._get_host_ip(volume_id)
+        export_path = self._get_export_path(volume_id)
+        LOG.debug(_("""Cloning with params ip %(host_ip)s, exp_path
+                    %(export_path)s, vol %(volume_name)s,
+                    clone_name %(clone_name)s""") % locals())
+        self._client.service.CloneNasFile(host_ip, export_path,
+                                          volume_name, clone_name)
+
+    @staticmethod
+    def _check_flags():
+        """Raises error if any required configuration flag for NetApp Cloud
+        Webservices is missing."""
+        required_flags = ['netapp_wsdl_url',
+                          'netapp_login',
+                          'netapp_password',
+                          'netapp_server_hostname',
+                          'netapp_server_port']
+        for flag in required_flags:
+            if not getattr(FLAGS, flag, None):
+                raise exception.CinderException(_('%s is not set') % flag)
+
+    @staticmethod
+    def _get_client():
+        """Creates SOAP _client for NetApp Cloud service."""
+        client = suds.client.Client(FLAGS.netapp_wsdl_url,
+                                    username=FLAGS.netapp_login,
+                                    password=FLAGS.netapp_password)
+        return client
+
+
+class NetAppDirectNfsDriver (NetAppNFSDriver):
+    """Executes commands related to volumes on NetApp filer"""
+    def __init__(self, *args, **kwargs):
+        super(NetAppDirectNfsDriver, self).__init__(*args, **kwargs)
+
+    def do_setup(self, context):
+        self._context = context
+        self.check_for_setup_error()
+        self._client = NetAppDirectNfsDriver._get_client()
+        self._do_custom_setup(self._client)
+
+    def check_for_setup_error(self):
+        """Returns an error if prerequisites aren't met"""
+        NetAppDirectNfsDriver._check_flags()
+
+    def _clone_volume(self, volume_name, clone_name, volume_id):
+        """Clones mounted volume on NetApp filer"""
+        raise NotImplementedError()
+
+    @staticmethod
+    def _check_flags():
+        """Raises error if any required configuration flag for NetApp
+        filer is missing."""
+        required_flags = ['netapp_login',
+                          'netapp_password',
+                          'netapp_server_hostname',
+                          'netapp_server_port',
+                          'netapp_transport_type']
+        for flag in required_flags:
+            if not getattr(FLAGS, flag, None):
+                raise exception.CinderException(_('%s is not set') % flag)
+
+    @staticmethod
+    def _get_client():
+        """Creates NetApp api client."""
+        client = NaServer(host=FLAGS.netapp_server_hostname,
+                          server_type=NaServer.SERVER_TYPE_FILER,
+                          transport_type=FLAGS.netapp_transport_type,
+                          style=NaServer.STYLE_LOGIN_PASSWORD,
+                          username=FLAGS.netapp_login,
+                          password=FLAGS.netapp_password)
+        return client
+
+    def _do_custom_setup(self, client):
+        """Do the customized set up on client if any for different types"""
+        raise NotImplementedError()
+
+    def _is_naelement(self, elem):
+        """Checks if element is NetApp element"""
+        if not isinstance(elem, NaElement):
+            raise ValueError('Expects NaElement')
+
+    def _invoke_succesfully(self, na_element, vserver=None):
+        """Invoke the api for successful result.
+           Vserver implies vserver api else filer/Cluster api.
+        """
+        self._is_naelement(na_element)
+        if vserver:
+            self._client.set_vserver(vserver)
+        else:
+            self._client.set_vserver(None)
+        result = self._client.invoke_successfully(na_element)
+        return result
+
+
+class NetAppDirectCmodeNfsDriver (NetAppDirectNfsDriver):
+    """Executes commands related to volumes on c mode"""
+    def __init__(self, *args, **kwargs):
+        super(NetAppDirectCmodeNfsDriver, self).__init__(*args, **kwargs)
+
+    def _do_custom_setup(self, client):
+        """Do the customized set up on client for cluster mode"""
+        client.set_api_version(1, 15)
+
+    def _clone_volume(self, volume_name, clone_name, volume_id):
+        """Clones mounted volume on NetApp Cluster"""
+        host_ip = self._get_host_ip(volume_id)
+        export_path = self._get_export_path(volume_id)
+        ifs = self._get_if_info_by_ip(host_ip)
+        vserver = ifs[0].get_child_content('vserver')
+        exp_volume = self._get_vol_by_junc_vserver(vserver, export_path)
+        self._clone_file(exp_volume, volume_name, clone_name, vserver)
+
+    def _get_if_info_by_ip(self, ip):
+        """Gets the network interface info by ip."""
+        net_if_iter = NaElement('net-interface-get-iter')
+        net_if_iter.add_new_child('max-records', '10')
+        query = NaElement('query')
+        net_if_iter.add_child_elem(query)
+        query.add_node_with_children('net-interface-info', **{'address': ip})
+        result = self._invoke_succesfully(net_if_iter)
+        if result.get_child_content('num-records') and\
+                int(result.get_child_content('num-records')) >= 1:
+            attr_list = result.get_child_by_name('attributes-list')
+            return attr_list.get_children()
+        raise exception.NotFound(
+            _('No interface found on cluster for ip %s')
+            % (ip))
+
+    def _get_vol_by_junc_vserver(self, vserver, junction):
+        """Gets the volume by junction path and vserver"""
+        vol_iter = NaElement('volume-get-iter')
+        vol_iter.add_new_child('max-records', '10')
+        query = NaElement('query')
+        vol_iter.add_child_elem(query)
+        vol_attrs = NaElement('volume-attributes')
+        query.add_child_elem(vol_attrs)
+        vol_attrs.add_node_with_children(
+            'volume-id-attributes',
+            **{'junction-path': junction,
+            'owning-vserver-name': vserver})
+        des_attrs = NaElement('desired-attributes')
+        des_attrs.add_node_with_children('volume-attributes',
+                                         **{'volume-id-attributes': None})
+        vol_iter.add_child_elem(des_attrs)
+        result = self._invoke_succesfully(vol_iter, vserver)
+        if result.get_child_content('num-records') and\
+                int(result.get_child_content('num-records')) >= 1:
+            attr_list = result.get_child_by_name('attributes-list')
+            vols = attr_list.get_children()
+            vol_id = vols[0].get_child_by_name('volume-id-attributes')
+            return vol_id.get_child_content('name')
+        raise exception.NotFound(_("""No volume on cluster with vserver
+                                   %(vserver)s and junction path %(junction)s
+                                   """) % locals())
+
+    def _clone_file(self, volume, src_path, dest_path, vserver=None):
+        """Clones file on vserver"""
+        LOG.debug(_("""Cloning with params volume %(volume)s,src %(src_path)s,
+                    dest %(dest_path)s, vserver %(vserver)s""")
+                  % locals())
+        clone_create = NaElement.create_node_with_children(
+            'clone-create',
+            **{'volume': volume, 'source-path': src_path,
+            'destination-path': dest_path})
+        self._invoke_succesfully(clone_create, vserver)
+
+
+class NetAppDirect7modeNfsDriver (NetAppDirectNfsDriver):
+    """Executes commands related to volumes on 7 mode"""
+    def __init__(self, *args, **kwargs):
+        super(NetAppDirect7modeNfsDriver, self).__init__(*args, **kwargs)
+
+    def _do_custom_setup(self, client):
+        """Do the customized set up on client if any for 7 mode"""
+        pass
+
+    def _clone_volume(self, volume_name, clone_name, volume_id):
+        """Clones mounted volume with NetApp filer"""
+        export_path = self._get_export_path(volume_id)
+        storage_path = self._get_actual_path_for_export(export_path)
+        (clone_id, vol_uuid) = self._start_clone('%s/%s' % (storage_path,
+                                                            volume_name),
+                                                 '%s/%s'
+                                                 % (storage_path, clone_name))
+        try:
+            self._wait_for_clone_finish(clone_id, vol_uuid)
+        except NaApiError as e:
+            if e.code != 'UnknownCloneId':
+                self._clear_clone(clone_id)
+            raise e
+
+    def _get_actual_path_for_export(self, export_path):
+        """Gets the actual path on the filer for export path"""
+        storage_path = NaElement.create_node_with_children(
+            'nfs-exportfs-storage-path', **{'pathname': export_path})
+        result = self._invoke_succesfully(storage_path, None)
+        if result.get_child_content('num-records') and\
+                int(result.get_child_content('num-records')) >= 1:
+            return result.get_child_content('actual-pathname')
+        raise exception.NotFound(_('No storage path found for export path %s')
+                                 % (export_path))
+
+    def _start_clone(self, src_path, dest_path):
+        """Starts the clone operation.
+           Returns the clone-id
+        """
+        LOG.debug(_("""Cloning with src %(src_path)s, dest %(dest_path)s""")
+                  % locals())
+        clone_start = NaElement.create_node_with_children(
+            'clone-start',
+            **{'source-path': src_path,
+            'destination-path': dest_path,
+            'no-snap': 'true'})
+        result = self._invoke_succesfully(clone_start, None)
+        clone_id_el = result.get_child_by_name('clone-id')
+        cl_id_info = clone_id_el.get_child_by_name('clone-id-info')
+        vol_uuid = cl_id_info.get_child_content('volume-uuid')
+        clone_id = cl_id_info.get_child_content('clone-op-id')
+        return (clone_id, vol_uuid)
+
+    def _wait_for_clone_finish(self, clone_id, vol_uuid):
+        """
+           Waits till a clone operation is complete or errored out.
+        """
+        clone_ls_st = NaElement('clone-list-status')
+        clone_id = NaElement('clone-id')
+        clone_ls_st.add_child_elem(clone_id)
+        clone_id.add_node_with_children('clone-id-info',
+                                        **{'clone-op-id': clone_id,
+                                        'volume-uuid': vol_uuid})
+        task_running = True
+        while task_running:
+            result = self._invoke_succesfully(clone_ls_st, None)
+            status = result.get_child_by_name('status')
+            ops_info = status.get_children()
+            if ops_info:
+                state = ops_info[0].get_child_content('clone-state')
+                if state == 'completed':
+                    task_running = False
+                elif state == 'failed':
+                    code = ops_info[0].get_child_content('error')
+                    reason = ops_info[0].get_child_content('reason')
+                    raise NaApiError(code, reason)
+                else:
+                    time.sleep(1)
+            else:
+                raise NaApiError(
+                    'UnknownCloneId',
+                    'No clone operation for clone id %s found on the filer'
+                    % (clone_id))
+
+    def _clear_clone(self, clone_id):
+        """Clear the clone information.
+           Invoke this in case of failed clone.
+        """
+        clone_clear = NaElement.create_node_with_children(
+            'clone-clear',
+            **{'clone-id': clone_id})
+        retry = 3
+        while retry:
+            try:
+                self._invoke_succesfully(clone_clear, None)
+                break
+            except Exception:
+                # Filer might be rebooting
+                time.sleep(5)
+            retry = retry - 1
