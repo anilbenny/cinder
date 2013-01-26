@@ -493,8 +493,7 @@ class NetAppDirect7modeNfsDriver (NetAppDirectNfsDriver):
         storage_path = NaElement.create_node_with_children(
             'nfs-exportfs-storage-path', **{'pathname': export_path})
         result = self._invoke_successfully(storage_path, None)
-        if result.get_child_content('num-records') and\
-                int(result.get_child_content('num-records')) >= 1:
+        if result.get_child_content('actual-pathname'):
             return result.get_child_content('actual-pathname')
         raise exception.NotFound(_('No storage path found for export path %s')
                                  % (export_path))
@@ -517,7 +516,7 @@ class NetAppDirect7modeNfsDriver (NetAppDirectNfsDriver):
         clone_id = cl_id_info.get_child_content('clone-op-id')
         return (clone_id, vol_uuid)
 
-    def _wait_for_clone_finish(self, clone_id, vol_uuid):
+    def _wait_for_clone_finish(self, clone_op_id, vol_uuid):
         """
            Waits till a clone operation is complete or errored out.
         """
@@ -525,7 +524,7 @@ class NetAppDirect7modeNfsDriver (NetAppDirectNfsDriver):
         clone_id = NaElement('clone-id')
         clone_ls_st.add_child_elem(clone_id)
         clone_id.add_node_with_children('clone-id-info',
-                                        **{'clone-op-id': clone_id,
+                                        **{'clone-op-id': clone_op_id,
                                         'volume-uuid': vol_uuid})
         task_running = True
         while task_running:
